@@ -1,103 +1,84 @@
 # bot.py
-# Random Telegram Bot with Flask (Render-ready)
-# Replace TELEGRAM_TOKEN in Render env vars with your bot token
-
-import os
-import requests
-from flask import Flask, request, jsonify
-import random
 import logging
+import os
+import random
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+# Set up logging to track bot activity and errors
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ✅ SAFE WAY (recommended for Render)
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# Bot token (use environment variable for security)
+TOKEN = os.getenv("TOKEN", "8266266158:AAGekMGM1yw91G9zBd08z9c7kMyecMG_Kws")  # Fallback for local testing
 
-# ⚠️ QUICK TEST (uncomment this line if env var doesn't work, but NOT safe)
-# TOKEN = "8385389366:AAGBlr4iANz5i6MxJjNgodhugGmhIdlCaOY"
-
-if not TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN env var is required")
-
-TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
-
-JOKES = [
-    "Why did the programmer quit his job? Because he didn't get arrays. 😅",
-    "Why do bees have sticky hair? Because they use honeycombs. 🐝",
-    "I told my computer I needed a break — it said: 'No problem, I'll go to sleep.' 💻😴",
-    "Why did the tomato blush? Because it saw the salad dressing. 🍅😳"
+# Sample data for bot responses
+jokes = [
+    "Why did the scarecrow become a programmer? He was outstanding in his field! 😄",
+    "Why don't eggs tell jokes? They'd crack up! 🥚",
+    "What do you call a dinosaur that brushes its teeth? A Flossiraptor! 🦖"
 ]
 
-HELP_TEXT = (
-    "Hey! I'm your Random Bot 🤖\n\n"
-    "Commands:\n"
-    "/start - Welcome message\n"
-    "/help - This message\n"
-    "/joke - Hear a random joke\n"
-    "/coin - Flip a coin\n"
-    "/rand <n> - Random number between 1 and n\n"
-    "/echo <text> - I'll repeat what you say\n\n"
-    "Or just send any text and I'll reply randomly. 🎲"
-)
+facts = [
+    "The shortest war lasted 38 minutes! ⏱️",
+    "Octopuses have three hearts and can change color! 🐙",
+    "Honey never spoils, even in ancient tombs! 🍯"
+]
 
-def send_message(chat_id: int, text: str, reply_to_message_id: int = None):
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
-    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+# Handler for the /start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a welcome message with an emoji-based interactive menu."""
+    # Define the inline keyboard with emoji buttons
+    keyboard = [
+        [
+            InlineKeyboardButton("😺 Joke", callback_data='joke'),
+            InlineKeyboardButton("🚀 Fact", callback_data='fact'),
+        ],
+        [InlineKeyboardButton("❓ Help", callback_data='help')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-@app.route("/", methods=["GET"])
-def index():
-    return "✅ Random Telegram Bot is running!"
+    # Send welcome message with the menu
+    await update.message.reply_text(
+        "Welcome to Emoji Bot! 🎉\nChoose an option:",
+        reply_markup=reply_markup
+    )
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = request.get_json(force=True)
-    message = update.get("message") or update.get("edited_message")
-    if not message:
-        return jsonify({"ok": True})
+# Handler for button clicks
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles button clicks and sends appropriate responses."""
+    query = update.callback_query
+    await query.answer()  # Acknowledge the button click
 
-    chat_id = message["chat"]["id"]
-    text = message.get("text", "")
-    msg_id = message.get("message_id")
+    choice = query.data
+    if choice == 'joke':
+        await query.message.reply_text(random.choice(jokes))
+    elif choice == 'fact':
+        await query.message.reply_text(random.choice(facts))
+    elif choice == 'help':
+        await query.message.reply_text(
+            "I'm Emoji Bot! 😊\n"
+            "Use /start to see the menu.\n"
+            "Click 😺 for a joke, 🚀 for a fact, or ❓ for this help message."
+        )
 
-    # Commands
-    if text.startswith("/start"):
-        send_message(chat_id, "Welcome! I'm Random Bot 🚀", msg_id)
-    elif text.startswith("/help"):
-        send_message(chat_id, HELP_TEXT, msg_id)
-    elif text.startswith("/joke"):
-        send_message(chat_id, random.choice(JOKES), msg_id)
-    elif text.startswith("/coin"):
-        send_message(chat_id, f"Coin flip: {random.choice(['Heads 🪙','Tails 🪙'])}", msg_id)
-    elif text.startswith("/rand"):
-        parts = text.split()
-        try:
-            n = int(parts[1])
-            send_message(chat_id, f"Random number (1–{n}): {random.randint(1,n)}", msg_id)
-        except:
-            send_message(chat_id, "Usage: /rand <number>", msg_id)
-    elif text.startswith("/echo"):
-        send_message(chat_id, text.partition(" ")[2] or "Usage: /echo <text>", msg_id)
-    else:
-        choice = random.choice([
-            random.choice(JOKES),
-            f"You said: {text}",
-            f"Random number: {random.randint(1,100)}",
-            f"Coin flip: {random.choice(['Heads','Tails'])}"
-        ])
-        send_message(chat_id, choice, msg_id)
+# Error handler
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logs errors for debugging."""
+    logger.error(f"Update {update} caused error {context.error}")
 
-    return jsonify({"ok": True})
+def main() -> None:
+    """Sets up and runs the bot."""
+    # Initialize the bot application
+    application = Application.builder().token(TOKEN).build()
 
-def set_webhook():
-    external_url = os.environ.get("RENDER_EXTERNAL_URL")
-    if not external_url:
-        return
-    webhook_url = f"https://{external_url}/{TOKEN}"
-    requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url})
+    # Register command and button handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(error_handler)
 
-if __name__ == "__main__":
-    set_webhook()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    # Start polling for updates
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
