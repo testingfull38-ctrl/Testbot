@@ -1,112 +1,157 @@
-# 🔗 LinkShortenerBot - Shorten your links with style ✨
-# ✅ Single script with internal logging system
+import os
+import logging
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from solana.rpc.api import Client
+from solana.transaction import Transaction
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.system_program import TransferParams, transfer
+import asyncio
 
-import requests
-import datetime
-from telegram import Update, Bot
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+# Configure logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 🔑 Main Bot Token (for users)
-BOT_TOKEN = "8385389366:AAEmM-MPUUGVDsUVIQEZ_RNMgd355eUc2c8"
+# Load environment variables
+load_dotenv()
+DEVNET_BOT_TOKEN = os.getenv("DEVNET_BOT_TOKEN")
+MONITORING_BOT_TOKEN = os.getenv("MONITORING_BOT_TOKEN")
+MONITORING_CHAT_ID = "7445514748"  # Your Telegram chat ID
+SENDER_PRIVATE_KEY = os.getenv("SENDER_PRIVATE_KEY")
 
-# 🔑 Logging Bot Token (used only for sending logs)
-LOG_BOT_TOKEN = "8266266158:AAGAa16y--lN5UzgxmUKFmkI1ymJf-o8ylI"
+# Solana Devnet client
+SOLANA_CLIENT = Client("https://api.devnet.solana.com")
+LAMPORTS_PER_SOL = 1_000_000_000  # 1 SOL = 1 billion lamports
 
-# 🆔 Chat ID where logs should be sent (your Telegram account or group)
-LOG_CHAT_ID = "7445514748"
+# Initialize sender keypair
+try:
+    sender_keypair = Keypair.from_bytes(eval(SENDER_PRIVATE_KEY))
+except Exception as e:
+    logger.error(f"❌ Error loading sender keypair: {e}")
+    raise SystemExit("Invalid SENDER_PRIVATE_KEY in environment variables")
 
-# 🔑 Bitly API Key
-BITLY_API_KEY = "3409ca54dcba37a7c0caf1e6f15cd24471257bad"
-
-# 🌐 Bitly API Endpoint
-BITLY_API_URL = "https://api-ssl.bitly.com/v4/shorten"
-
-# 📌 Helper function: Send logs to your log chat
-async def log_activity(message: str):
-    log_bot = Bot(LOG_BOT_TOKEN)
-    timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    await log_bot.send_message(
-        chat_id=LOG_CHAT_ID,
-        text=f"📝 *Log* ({timestamp}):\n{message}",
-        parse_mode="Markdown",
-    )
-
-# 📌 /start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command for Devnet Bot."""
+    keyboard = [
+        [InlineKeyboardButton("Send SOL 🚀", callback_data="send_sol")],
+        [InlineKeyboardButton("Check Balance 💰", callback_data="check_balance")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 Hi there! I’m *LinkShortenerBot* 🤖\n\n"
-        "Paste a long link and I’ll make it short & neat 🔗✨\n\n"
-        "👉 Try /help to learn how to use me.",
-        parse_mode="Markdown",
+        "🌟 Welcome to Solana Devnet Bot!\n"
+        "Choose an action below to send SOL or check your wallet balance.",
+        reply_markup=reply_markup
     )
-    await log_activity(f"User @{user.username} ({user.id}) started the bot.")
+    await send_monitoring_message(f"🔔 User {update.effective_user.id} started the Devnet Bot.")
 
-# 📌 /help command
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button presses for Devnet Bot."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "send_sol":
+        await query.message.reply_text(
+            "📨 Enter the recipient's Solana address and amount (in SOL):\n"
+            "Example: /send <address> <amount>"
+        )
+    elif query.data == "check_balance":
+        balance = get_wallet_balance(sender_keypair.pubkey())
+        await query.message.reply_text(f"💰 Wallet balance: {balance / LAMPORTS_PER_SOL:.2f} SOL")
+        await send_monitoring_message(
+            f"📊 User {update.effective_user.id} checked balance: {balance / LAMPORTS_PER_SOL:.2f} SOL"
+        )
+
+async def send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /send command to transfer SOL on Devnet."""
+    try:
+        args = context.args
+        if len(args) != 2:
+            await update.message.reply_text("❌ Usage: /send <recipient_address> <amount_in_sol>")
+            return
+
+        recipient_address = args[0]
+        amount_sol = float(args[1])
+        amount_lamports = int(amount_sol * LAMPORTS_PER_SOL)
+
+        # Validate recipient address
+        try:
+            recipient_pubkey = Pubkey.from_string(recipient_address)
+        except ValueError:
+            await update.message.reply_text("❌ Invalid Solana address!")
+            return
+
+        # Create and send transaction
+        transaction = Transaction().add(
+            transfer(TransferParams(
+                from_pubkey=sender_keypair.pubkey(),
+                to_pubkey=recipient_pubkey,
+                lamports=amount_lamports
+            ))
+        )
+        response = SOLANA_CLIENT.send_transaction(transaction, sender_keypair)
+        tx_hash = response.value
+
+        await update.message.reply_text(
+            f"✅ Transaction sent! 🎉\n"
+            f"View on Explorer: https://explorer.solana.com/tx/{tx_hash}?cluster=devnet"
+        )
+        await send_monitoring_message(
+            f"💸 User {update.effective_user.id} sent {amount_sol:.2f} SOL to {recipient_address}\n"
+            f"Tx Hash: https://explorer.solana.com/tx/{tx_hash}?cluster=devnet"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Transaction failed: {str(e)}")
+        await send_monitoring_message(
+            f"🚨 Transaction error by user {update.effective_user.id}: {str(e)}"
+        )
+
+def get_wallet_balance(pubkey: Pubkey) -> int:
+    """Get wallet balance in lamports."""
+    try:
+        response = SOLANA_CLIENT.get_balance(pubkey)
+        return response.value
+    except Exception as e:
+        logger.error(f"❌ Failed to get balance: {e}")
+        return 0
+
+async def send_monitoring_message(message: str) -> None:
+    """Send a message to the Monitoring Bot."""
+    try:
+        app = Application.builder().token(MONITORING_BOT_TOKEN).build()
+        await app.bot.send_message(chat_id=MONITORING_CHAT_ID, text=message)
+    except Exception as e:
+        logger.error(f"❌ Failed to send monitoring message: {e}")
+
+async def monitoring_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command for Monitoring Bot."""
     await update.message.reply_text(
-        "❓ *How to use me*\n\n"
-        "➡️ Send: `/shorten https://example.com`\n"
-        "➡️ I’ll reply with a short Bitly link ⚡️\n\n"
-        "💡 Tip: You can send me any valid URL.",
-        parse_mode="Markdown",
+        "🔔 Solana Devnet Monitoring Bot is active! 📡\n"
+        "You'll receive updates on Devnet Bot activities here."
     )
-    await log_activity(f"User @{user.username} ({user.id}) requested /help.")
 
-# 📌 /shorten command
-async def shorten_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    url = " ".join(context.args)
+def main() -> None:
+    """Run both bots."""
+    # Devnet Bot
+    devnet_app = Application.builder().token(DEVNET_BOT_TOKEN).build()
+    devnet_app.add_handler(CommandHandler("start", start))
+    devnet_app.add_handler(CommandHandler("send", send))
+    devnet_app.add_handler(CallbackQueryHandler(button_callback))
 
-    if not url:
-        await update.message.reply_text(
-            "⚠️ Please provide a link!\n\nExample:\n`/shorten https://example.com`",
-            parse_mode="Markdown",
+    # Monitoring Bot
+    monitoring_app = Application.builder().token(MONITORING_BOT_TOKEN).build()
+    monitoring_app.add_handler(CommandHandler("start", monitoring_start))
+
+    # Start both bots
+    logger.info("🚀 Starting Devnet and Monitoring Bots...")
+    asyncio.get_event_loop().run_until_complete(
+        asyncio.gather(
+            devnet_app.run_polling(),
+            monitoring_app.run_polling()
         )
-        await log_activity(f"User @{user.username} ({user.id}) used /shorten without a URL.")
-        return
-
-    if not (url.startswith("http://") or url.startswith("https://")):
-        url = "https://" + url
-
-    headers = {"Authorization": f"Bearer {BITLY_API_KEY}", "Content-Type": "application/json"}
-    data = {"long_url": url}
-    response = requests.post(BITLY_API_URL, headers=headers, json=data)
-
-    if response.status_code == 200:
-        short_url = response.json()["link"]
-        await update.message.reply_text(
-            f"✅ Success! Here’s your short link:\n\n🔗 {short_url}"
-        )
-        await log_activity(f"User @{user.username} ({user.id}) shortened {url} → {short_url}")
-    else:
-        await update.message.reply_text("❌ Oops! Something went wrong. Please try again later.")
-        await log_activity(f"⚠️ ERROR: Failed to shorten {url} for @{user.username} ({user.id})")
-
-# 📌 Log all other messages (non-commands)
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text
-    await log_activity(f"User @{user.username} ({user.id}) sent a message: {text}")
-
-# 🚀 Main function
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    # Add handlers (scheduler configuration removed)
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("shorten", shorten_url))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    app.run_polling()
+    )
 
 if __name__ == "__main__":
     main()
